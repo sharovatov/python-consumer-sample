@@ -28,63 +28,54 @@ The producer rejects invalid operands with a diagnostic on stderr and exit
 status 2. If the executable cannot be started, the consumer reports the error
 on stderr and exits with status 1.
 
-## Optional local answer evaluator
+## Optional API answer evaluator
 
-The evaluator requires Python 3.11 or newer. The setup was exercised with Python 3.11.15 on macOS arm64. From this repository, create a
-separate environment and install the pinned dependencies:
+The evaluator calls the pinned OpenAI model `gpt-4o-2024-11-20`. It needs Python
+3.7 or newer, network access, and an OpenAI API key with model access and credits.
+It uses Python's standard library; no extra Python packages are required.
 
-```sh
-python3 -m venv ~/.venvs/python-consumer-sample
-source ~/.venvs/python-consumer-sample/bin/activate
-python -m pip install -r requirements-eval.txt
-python eval.py
+Put the key in a local `.env` file beside `eval.py`:
+
+```dotenv
+OPENAI_API_KEY=your-key-here
 ```
 
-The first eval run downloads the tokenizer and model weights for
-[SmolLM2-135M-Instruct](https://huggingface.co/HuggingFaceTB/SmolLM2-135M-Instruct),
-revision `12fd25f77366fa6b3b4b768ec3050bf629380bac`,
-using Transformers. Hugging Face stores them in its normal user cache,
-`~/.cache/huggingface/hub/`, and reuses them on subsequent runs.
-The weights are not part of this repository. Evaluation runs locally on the
-CPU with float32 weights and greedy decoding, without training.
+Alternatively, set `OPENAI_API_KEY` in the process environment. A value in the
+local `.env` takes precedence. The file is read as data, not executed, and the
+key is excluded from diagnostic output.
 
-`python eval.py` evaluates one actual `./consumer sum 2 3` response.
-Choose another input pair with `python eval.py 4 5`. Python computes the
-expected sum; the model judges whether the observed response communicates it
-without contradiction or an unresolved alternative. Wording and capitalization
-may vary. Number words expressing the answer must be conventionally spelled.
-
-Each run prints JSON lines containing its configuration, the exact observed
-response, raw judge output, verdict, and summary. The verdict is `ACCEPT` or
-`REJECT`. Surrounding whitespace is ignored; extra explanation, missing
-labels, or truncated output produces an evaluator error and no verdict.
-
-Exit status 0 means the model accepted every response in that run; 1 means
-at least one was rejected; 2 means input, model, verdict, or consumer execution
-errors prevented a complete evaluation. A model verdict needs independent
-validation before it can support a correctness claim. One run observes one
-response and does not establish reliability across the producer's possible
-outputs.
-
-To check the judge against prepared responses, supply JSON lines with exactly
-`a`, `b`, and `response` fields:
+Run from this repository:
 
 ```sh
-python eval.py --responses-stdin <<'EOF'
-{"a": 2, "b": 3, "response": "five"}
-{"a": 2, "b": 3, "response": "11"}
-EOF
+python3 -B eval.py
+python3 -B eval.py 4 5
 ```
 
-This mode does not call the consumer. Compare its judgments with independently
-reviewed labels; the model never receives the reference labels. The summary
-counts the model's verdicts, not the number of correct judgments.
+The first command evaluates one actual `./consumer sum 2 3` response; the second
+selects another pair. To judge supplied text, pass JSON lines containing exactly
+integer `a` and `b` values from 0 through 9 and a string `response` to
+`python3 -B eval.py --responses-stdin`.
 
-Once the first download has completed, cached evaluation can also run offline:
+Python computes the expected sum. The model judges whether the response clearly
+communicates it without contradiction or an unresolved alternative. Equivalent
+wording and capitalization are acceptable; number words must be conventionally
+spelled.
 
-```sh
-HF_HUB_OFFLINE=1 python eval.py
-```
+The verdict must be exactly ACCEPT or REJECT, ignoring surrounding whitespace.
+Explanations, empty output, refusals, truncated output, and API failures are
+evaluator errors and supply no acceptance verdict. Requests use temperature 0,
+top_p 1, seed 0, a 256-token cap, and `store: false`. There are no automatic
+retries. The seed and temperature do not guarantee identical future responses.
 
-The ordinary `./consumer sum 2 3` command remains usable without any
-eval dependencies.
+JSON-line evidence records the request messages, raw API response, model,
+backend fingerprint, token usage, termination reason, timing, and request ID.
+The API does not expose its internal rendered prompt or generated token IDs.
+Requests send the judging instruction, expected sum, and response text to OpenAI
+and consume API credits.
+
+Exit status 0 means all model verdicts were ACCEPT; 1 means at least one REJECT;
+2 means an input, API, verdict, or consumer error. These statuses report model
+judgments; they do not independently prove those judgments correct.
+
+Initial independent development checks matched the reviewed labels. Fresh
+held-out validation and broader repeatability checks remain pending.

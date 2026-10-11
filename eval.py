@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Judge one consumer response, or supplied responses, with a local model."""
+"""Judge one consumer response, or supplied responses, with GPT-4o through the OpenAI API."""
 
 import argparse
 from datetime import datetime, timezone
@@ -11,10 +11,11 @@ import platform
 import subprocess
 import sys
 import time
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
-MODEL_ID = "HuggingFaceTB/SmolLM2-135M-Instruct"
-MODEL_REVISION = "12fd25f77366fa6b3b4b768ec3050bf629380bac"
-MAX_NEW_TOKENS = 16
+MODEL_ID = "gpt-4o-2024-11-20"
+MAX_NEW_TOKENS = 256
 JUDGING_INSTRUCTION = (
     "Decide whether the response clearly communicates the expected sum without "
     "a contradictory answer or unresolved alternative. Accept equivalent wording "
@@ -58,31 +59,86 @@ def read_responses(stream):
     return cases
 
 
+API_ENDPOINT = "https://api.openai.com/v1/chat/completions"
+TEMPERATURE = 0
+TOP_P = 1
+SEED = 0
+REQUEST_TIMEOUT_SECONDS = 45
+
+
+def load_api_key():
+    """Read only OPENAI_API_KEY; never execute or display .env contents."""
+    env_file = Path(__file__).resolve().with_name(".env")
+    key = None
+    if env_file.is_file():
+        for line in env_file.read_text().splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.startswith("export "):
+                line = line[7:].strip()
+            name, separator, value = line.partition("=")
+            if separator and name.strip() == "OPENAI_API_KEY":
+                value = value.strip()
+                if value[:1] in ("'", '"'):
+                    if len(value) < 2 or value[-1] != value[0]:
+                        raise RuntimeError("OPENAI_API_KEY has unmatched quotes in .env")
+                    value = value[1:-1]
+                key = value
+    if key is None:
+        key = os.environ.get("OPENAI_API_KEY", "")
+    if not key or not key.isascii() or any(char.isspace() for char in key):
+        raise RuntimeError(
+            "Set OPENAI_API_KEY in .env beside eval.py or in the environment"
+        )
+    return key
+
+
+def parse_verdict(data):
+    """A formatted label is usable only after a complete, non-refused response."""
+    result = {
+        "status": "evaluator_error", "verdict": None,
+        "judge_output": None, "termination_reason": None,
+        "generated_token_count": None,
+    }
+    if not isinstance(data, dict):
+        return {**result, "error": "invalid_api_response"}
+    choices = data.get("choices")
+    if not isinstance(choices, list) or len(choices) != 1:
+        return {**result, "error": "invalid_api_response"}
+    choice = choices[0]
+    if not isinstance(choice, dict) or not isinstance(choice.get("message"), dict):
+        return {**result, "error": "invalid_api_response"}
+    message = choice["message"]
+    raw = message.get("content")
+    finish = choice.get("finish_reason")
+    usage = data.get("usage")
+    count = usage.get("completion_tokens") if isinstance(usage, dict) else None
+    result.update(
+        judge_output=raw, termination_reason=finish, generated_token_count=count,
+    )
+    if data.get("model") != MODEL_ID:
+        return {**result, "error": "unexpected_response_model"}
+    if type(count) is not int or count < 0:
+        return {**result, "error": "missing_or_invalid_token_usage"}
+    if finish == "length" or count >= MAX_NEW_TOKENS:
+        return {**result, "error": "generation_limit_reached"}
+    if message.get("refusal"):
+        return {**result, "error": "model_refusal"}
+    if finish != "stop":
+        return {**result, "error": "incomplete_or_nontext_response"}
+    if message.get("role") != "assistant" or message.get("tool_calls") or message.get("function_call"):
+        return {**result, "error": "invalid_api_response"}
+    label = raw.strip() if isinstance(raw, str) else None
+    if label not in ("ACCEPT", "REJECT"):
+        return {**result, "error": "invalid_verdict"}
+    return {**result, "status": "judged", "verdict": label}
+
+
 class Judge:
     def __init__(self):
-        import torch
-        import transformers
-        from transformers import AutoModelForCausalLM, AutoTokenizer, GenerationConfig
-
-        self.torch = torch
-        torch.set_num_threads(min(4, os.cpu_count() or 1))
-        self.versions = {
-            "torch": torch.__version__,
-            "transformers": transformers.__version__,
-            "cpu_threads": torch.get_num_threads(),
-        }
-        options = {"revision": MODEL_REVISION, "token": False, "trust_remote_code": False}
-        self.tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, **options)
-        self.model = AutoModelForCausalLM.from_pretrained(
-            MODEL_ID, dtype=torch.float32, **options
-        ).to("cpu").eval()
-        self.generation = GenerationConfig(
-            do_sample=False,
-            max_new_tokens=MAX_NEW_TOKENS,
-            bos_token_id=self.tokenizer.bos_token_id,
-            eos_token_id=self.tokenizer.eos_token_id,
-            pad_token_id=self.tokenizer.eos_token_id,
-        )
+        self.api_key = load_api_key()
+        self.versions = {"transport": "Python standard library HTTPS"}
 
     def evaluate(self, expected_sum, response):
         messages = [
@@ -92,34 +148,52 @@ class Judge:
                 ensure_ascii=False,
             )},
         ]
-        inputs = self.tokenizer.apply_chat_template(
-            messages, tokenize=True, add_generation_prompt=True,
-            return_dict=True, return_tensors="pt",
+        payload = {
+            "model": MODEL_ID, "messages": messages, "temperature": TEMPERATURE,
+            "top_p": TOP_P, "seed": SEED, "max_completion_tokens": MAX_NEW_TOKENS,
+            "n": 1, "stream": False, "store": False,
+        }
+        record = {"api_endpoint": API_ENDPOINT, "request": payload}
+        request = Request(
+            API_ENDPOINT, data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+            headers={
+                "Authorization": "Bearer " + self.api_key,
+                "Content-Type": "application/json",
+            },
+            method="POST",
         )
-        input_length = inputs["input_ids"].shape[-1]
-        if input_length + MAX_NEW_TOKENS > self.model.config.max_position_embeddings:
-            raise ValueError("response exceeds the model context; nothing was truncated")
-        with self.torch.inference_mode():
-            output = self.model.generate(**inputs, generation_config=self.generation)
-        generated = output[0, input_length:].tolist()
-        raw = self.tokenizer.decode(
-            generated, skip_special_tokens=False, clean_up_tokenization_spaces=False,
-        )
-        finished = bool(generated) and generated[-1] == self.tokenizer.eos_token_id
-        content_ids = generated[:-1] if finished else generated
-        text = self.tokenizer.decode(
-            content_ids, skip_special_tokens=False, clean_up_tokenization_spaces=False,
-        )
-        label = text.strip()
-        valid = finished and label in ("ACCEPT", "REJECT")
+        try:
+            with urlopen(request, timeout=REQUEST_TIMEOUT_SECONDS) as result:
+                record.update(
+                    http_status=result.status,
+                    request_id=result.headers.get("x-request-id"),
+                )
+                data = json.loads(result.read())
+        except HTTPError as error:
+            try:
+                detail = json.loads(error.read()).get("error", {})
+                if not isinstance(detail, dict):
+                    detail = {}
+            except (ValueError, AttributeError):
+                detail = {}
+            return {
+                **record, "status": "evaluator_error", "verdict": None,
+                "error": "api_http_error", "http_status": error.code,
+                "request_id": error.headers.get("x-request-id") if error.headers else None,
+                "api_error_type": str(detail.get("type", "")).replace(self.api_key, "[REDACTED]"),
+                "api_error_code": str(detail.get("code", "")).replace(self.api_key, "[REDACTED]"),
+                "message": str(detail.get("message", "")).replace(self.api_key, "[REDACTED]"),
+            }
+        except (URLError, TimeoutError, OSError, ValueError) as error:
+            return {
+                **record, "status": "evaluator_error", "verdict": None,
+                "error": "api_transport_or_response_error",
+                "message": str(error).replace(self.api_key, "[REDACTED]"),
+            }
+        # Request headers and credentials are never part of the evidence.
+        data = json.loads(json.dumps(data, ensure_ascii=False).replace(self.api_key, "[REDACTED]"))
         return {
-            "verdict": label if valid else None,
-            "judge_output": raw,
-            "generated_token_ids": generated,
-            "status": "judged" if valid else "evaluator_error",
-            **({} if valid else {
-                "error": "invalid_verdict" if finished else "generation_limit_reached"
-            }),
+            **record, "raw_api_response": data, **parse_verdict(data),
         }
 
 
@@ -153,11 +227,11 @@ def main(argv=None):
         "python": platform.python_version(),
         "platform": platform.platform(),
         "model": MODEL_ID,
-        "model_revision": MODEL_REVISION,
-        "device": "cpu",
-        "dtype": "float32",
-        "do_sample": False,
-        "max_new_tokens": MAX_NEW_TOKENS,
+        "api_endpoint": API_ENDPOINT,
+        "temperature": TEMPERATURE,
+        "top_p": TOP_P,
+        "seed": SEED,
+        "max_completion_tokens": MAX_NEW_TOKENS,
         "judging_instruction": JUDGING_INSTRUCTION,
         "script_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
     })
@@ -166,7 +240,9 @@ def main(argv=None):
     except Exception as error:
         emit({"type": "error", "stage": "model_setup", "error": str(error)})
         return 2
-    emit({"type": "environment", **judge.versions})
+    emit({
+        "type": "environment", **judge.versions,
+    })
     counts = {"accept": 0, "reject": 0, "evaluator_errors": 0, "consumer_errors": 0}
     consumer = Path(__file__).resolve().with_name("consumer")
     for index, case in enumerate(cases, 1):
