@@ -36,10 +36,19 @@ Run all eight application cases with one command:
 ./eval
 ```
 
+`eval_cases.json` makes each case's inputs and expected result visible:
+
+```json
+{"id": "A05", "a": 2, "b": 3, "expected_sum": 5}
+```
+
 Each case runs the actual `./consumer sum a b`, captures its response and exit
-status, computes the expected sum in Python, and asks the existing judge to
-assess the response. `eval_cases.json` contains only IDs and operands; there
-are no fixed responses. The cases run once each in this order:
+status, and asks the existing judge whether the response communicates the
+case's `expected_sum`. Python first checks that every expected sum equals
+`a + b`; missing or inconsistent expectations stop the run with an input error
+before any consumer or API calls. It never silently replaces an expectation.
+The judge accepts equivalent wording under the shared acceptance rule. The
+cases run once each in this order:
 
 | Inputs | Purpose |
 |---|---|

@@ -27,16 +27,23 @@ def read_cases(path):
     for index, case in enumerate(cases, 1):
         if (
             not isinstance(case, dict)
-            or set(case) != {"id", "a", "b"}
+            or set(case) != {"id", "a", "b", "expected_sum"}
             or not isinstance(case.get("id"), str)
             or not case["id"]
             or case["id"] in ids
             or any(type(case.get(key)) is not int or not 0 <= case[key] <= 9
                    for key in ("a", "b"))
+            or type(case.get("expected_sum")) is not int
         ):
             raise ValueError(
                 f"suite case {index}: expected a unique nonempty id and integer "
-                "a and b (0..9), with no other fields"
+                "a and b (0..9), and integer expected_sum, with no other fields"
+            )
+        calculated_sum = case["a"] + case["b"]
+        if case["expected_sum"] != calculated_sum:
+            raise ValueError(
+                f"suite case {case['id']}: expected_sum must be {calculated_sum} "
+                f"for {case['a']} + {case['b']}; got {case['expected_sum']}"
             )
         ids.add(case["id"])
     return cases, hashlib.sha256(data).hexdigest()
@@ -48,7 +55,7 @@ def evaluate_case(index, case, judge):
     record = {
         "type": "result", "case": index, "case_id": case["id"],
         "a": case["a"], "b": case["b"],
-        "expected_sum": case["a"] + case["b"],
+        "expected_sum": case["expected_sum"],
         "expected_verdict": "ACCEPT", "test_status": "error",
         "consumer_command": command,
     }
