@@ -28,11 +28,63 @@ The producer rejects invalid operands with a diagnostic on stderr and exit
 status 2. If the executable cannot be started, the consumer reports the error
 on stderr and exits with status 1.
 
+## Application eval suite
+
+Run all eight application cases with one command:
+
+```sh
+./eval
+```
+
+Each case runs the actual `./consumer sum a b`, captures its response and exit
+status, computes the expected sum in Python, and asks the existing judge to
+assess the response. `eval_cases.json` contains only IDs and operands; there
+are no fixed responses. The cases run once each in this order:
+
+| Inputs | Purpose |
+|---|---|
+| `0 + 0`, `9 + 9` | Minimum and maximum sums |
+| `0 + 9`, `9 + 0` | Zero in either position |
+| `2 + 3`, `3 + 2` | Ordinary addition and reversed operands |
+| `4 + 5`, `4 + 6` | One-digit to two-digit answer boundary |
+
+The terminal uses the same readable format as judge validation: PASS, FAIL,
+or ERROR per case, with the operands, expected sum, actual response, judge
+verdict, duration, and a final summary. PASS means ACCEPT; FAIL means REJECT;
+ERROR means the consumer or evaluator could not supply a usable result.
+All cases run even if an earlier case fails. Consumer calls time out after
+10 seconds. There are no automatic retries.
+
+The judge requires the API key and network setup described below. A normal run
+makes eight API calls and consumes API credits. `./eval` prefers the installed
+Homebrew Python 3.11 on this macOS setup, falling back to `python3` elsewhere.
+To select an interpreter explicitly, run `python3 -B eval.py`.
+
+Save full JSONL records while retaining readable terminal output:
+
+```sh
+./eval --evidence application-run.jsonl
+```
+
+The parent directory must exist and the evidence file must be new. Records
+include the selected cases, source and binary checksums, commands, captured
+stdout/stderr and exit status, judge requests/responses, timing, and summary.
+Evidence write errors stop the run. Without `--evidence`, no file is written.
+Exit 0 means all cases passed; 1 means at least one failed with no errors;
+2 means an input, setup, consumer, evaluator, or evidence-file error.
+
+This is a representative sample, not exhaustive input or output coverage.
+Random wording can change between runs. A passing run reports the judge's
+acceptance of these eight observed responses, not universal correctness or
+repeatability. Inspect rejected responses because the judge is fallible.
+The separate judge-validation command below continues to run only its fixed
+reviewed examples.
+
 ## Judge validation
 
 The fixed examples validate the judge independently against reviewed labels.
-They do not tune the judge or exercise the consumer and producer. A suite that
-runs multiple live consumer/producer cases has not yet been implemented.
+They do not tune the judge or exercise the consumer and producer. Use `./eval`
+above to run the application suite.
 
 The judge calls the pinned OpenAI model `gpt-4o-2024-11-20`. It needs Python
 3.7 or newer, network access, and an OpenAI API key with model access and credits.

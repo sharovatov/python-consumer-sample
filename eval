@@ -1,0 +1,6 @@
+#!/bin/sh
+# Prefer the installed Python with working TLS trust on this macOS setup.
+if [ -x /opt/homebrew/opt/python@3.11/libexec/bin/python3 ]; then
+    exec /opt/homebrew/opt/python@3.11/libexec/bin/python3 -B "$(dirname "$0")/eval.py" "$@"
+fi
+exec python3 -B "$(dirname "$0")/eval.py" "$@"
