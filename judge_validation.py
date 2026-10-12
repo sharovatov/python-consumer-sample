@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Judge one consumer response, or supplied responses, with GPT-4o through the OpenAI API."""
+"""Validate GPT-4o on reviewed examples, or judge a live consumer response."""
 
 import argparse
 from datetime import datetime, timezone
@@ -46,24 +46,24 @@ class Reporter:
         if kind == "run":
             count = record["case_count"]
             source = record["source"].replace("_", " ")
-            print("Consumer answer evaluation")
+            print("Judge validation suite" if record["source"] == "reviewed_examples"
+                  else "Consumer answer evaluation")
             print(f"Judge: {record['model']}")
             print(f"Source: {source}")
             print(f"\nRunning {count} {'case' if count == 1 else 'cases'}...\n", flush=True)
         elif kind == "result":
-            if record["status"] == "judged":
-                label = "PASS" if record["verdict"] == "ACCEPT" else "FAIL"
-            else:
-                label = "ERROR"
-            title = f"{label:<5} sum({record['a']}, {record['b']})"
+            label = {"passed": "PASS", "failed": "FAIL", "error": "ERROR"}[record["test_status"]]
+            case_id = f"{record['case_id']}  " if "case_id" in record else ""
+            title = f"{label:<5} {case_id}sum({record['a']}, {record['b']})"
             print(f"{title:<48} {record['elapsed_seconds']:.2f}s")
-            print(f"      Expected: {record['expected_sum']}")
+            print(f"      Expected sum:     {record['expected_sum']}")
             response = (
                 json.dumps(record["response"], ensure_ascii=False)
                 if "response" in record else "(unavailable)"
             )
-            print(f"      Response: {response}")
-            print(f"      Judge:    {record.get('verdict') or '(no verdict)'}")
+            print(f"      Response:         {response}")
+            print(f"      Expected verdict: {record['expected_verdict']}")
+            print(f"      Judge verdict:    {record.get('verdict') or '(no verdict)'}")
             if label == "ERROR":
                 stage = record["status"].replace("_", " ")
                 detail = record.get("message") or record.get("error", "unknown error")
@@ -80,7 +80,7 @@ class Reporter:
             errors = record["evaluator_errors"] + record["consumer_errors"]
             elapsed = time.monotonic() - self.started
             print(
-                f"{record['accept']} passed, {record['reject']} failed, "
+                f"{record['passed']} passed, {record['failed']} failed, "
                 f"{errors} {'error' if errors == 1 else 'errors'} in {elapsed:.2f}s",
                 flush=True,
             )
@@ -116,6 +116,32 @@ def read_responses(stream):
     return cases
 
 
+def read_suite(path):
+    data = path.read_bytes()
+    cases = json.loads(data)
+    if not isinstance(cases, list) or not cases:
+        raise ValueError("reviewed suite must be a nonempty JSON array")
+    ids = set()
+    for index, case in enumerate(cases, 1):
+        if (
+            not isinstance(case, dict)
+            or set(case) != {"id", "a", "b", "response", "expected_verdict"}
+            or not isinstance(case.get("id"), str)
+            or not case["id"]
+            or case["id"] in ids
+            or any(type(case.get(key)) is not int or not 0 <= case[key] <= 9
+                   for key in ("a", "b"))
+            or not isinstance(case.get("response"), str)
+            or case.get("expected_verdict") not in ("ACCEPT", "REJECT")
+        ):
+            raise ValueError(
+                f"suite case {index}: expected a unique nonempty id, integer a and b "
+                "(0..9), a string response, and expected_verdict ACCEPT or REJECT"
+            )
+        ids.add(case["id"])
+    return cases, hashlib.sha256(data).hexdigest()
+
+
 API_ENDPOINT = "https://api.openai.com/v1/chat/completions"
 TEMPERATURE = 0
 TOP_P = 1
@@ -146,7 +172,7 @@ def load_api_key():
         key = os.environ.get("OPENAI_API_KEY", "")
     if not key or not key.isascii() or any(char.isspace() for char in key):
         raise RuntimeError(
-            "Set OPENAI_API_KEY in .env beside eval.py or in the environment"
+            "Set OPENAI_API_KEY in .env beside judge_validation.py or in the environment"
         )
     return key
 
@@ -256,7 +282,10 @@ class Judge:
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("operands", nargs="*", type=operand, metavar="N")
+    parser.add_argument(
+        "operands", nargs="*", type=operand, metavar="N",
+        help="two operands for one live consumer check; omit to run the judge validation suite",
+    )
     parser.add_argument(
         "--responses-stdin", action="store_true",
         help='judge JSON lines containing {"a": 2, "b": 3, "response": "five"}',
@@ -301,12 +330,20 @@ def main(argv=None):
 
 def run(args, reporter):
     emit = reporter.emit
+    suite_info = {}
     try:
         if args.responses_stdin:
             cases = read_responses(sys.stdin)
-        else:
-            a, b = args.operands or (2, 3)
+            source = "supplied_responses"
+        elif args.operands:
+            a, b = args.operands
             cases = [{"a": a, "b": b}]
+            source = "consumer"
+        else:
+            suite_path = Path(__file__).resolve().with_name("judge_validation_cases.json")
+            cases, suite_digest = read_suite(suite_path)
+            source = "reviewed_examples"
+            suite_info = {"suite_file": suite_path.name, "suite_sha256": suite_digest}
     except (ValueError, OSError) as error:
         emit({"type": "error", "stage": "input", "error": str(error)})
         return 2
@@ -314,7 +351,8 @@ def run(args, reporter):
     emit({
         "type": "run",
         "started_at": datetime.now(timezone.utc).isoformat(),
-        "source": "supplied_responses" if args.responses_stdin else "consumer",
+        "source": source,
+        **suite_info,
         "case_count": len(cases),
         "python": platform.python_version(),
         "platform": platform.platform(),
@@ -335,15 +373,22 @@ def run(args, reporter):
     emit({
         "type": "environment", **judge.versions,
     })
-    counts = {"accept": 0, "reject": 0, "evaluator_errors": 0, "consumer_errors": 0}
+    counts = {
+        "accept": 0, "reject": 0, "passed": 0, "failed": 0,
+        "evaluator_errors": 0, "consumer_errors": 0,
+    }
     consumer = Path(__file__).resolve().with_name("consumer")
     for index, case in enumerate(cases, 1):
         started = time.monotonic()
         record = {
             "type": "result", "case": index, "a": case["a"], "b": case["b"],
             "expected_sum": case["a"] + case["b"],
+            "expected_verdict": case.get("expected_verdict", "ACCEPT"),
+            "test_status": "error",
         }
-        if args.responses_stdin:
+        if "id" in case:
+            record["case_id"] = case["id"]
+        if "response" in case:
             record["response"] = case["response"]
         else:
             try:
@@ -372,11 +417,15 @@ def run(args, reporter):
             counts["evaluator_errors"] += 1
         else:
             counts[record["verdict"].lower()] += 1
+            record["test_status"] = (
+                "passed" if record["verdict"] == record["expected_verdict"] else "failed"
+            )
+            counts[record["test_status"]] += 1
         record["elapsed_seconds"] = round(time.monotonic() - started, 4)
         emit(record)
     exit_status = (
         2 if counts["evaluator_errors"] or counts["consumer_errors"]
-        else 1 if counts["reject"] else 0
+        else 1 if counts["failed"] else 0
     )
     emit({"type": "summary", "total": len(cases), **counts, "exit_status": exit_status})
     return exit_status

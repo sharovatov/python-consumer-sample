@@ -28,13 +28,17 @@ The producer rejects invalid operands with a diagnostic on stderr and exit
 status 2. If the executable cannot be started, the consumer reports the error
 on stderr and exits with status 1.
 
-## Optional API answer evaluator
+## Judge validation
 
-The evaluator calls the pinned OpenAI model `gpt-4o-2024-11-20`. It needs Python
+The fixed examples validate the judge independently against reviewed labels.
+They do not tune the judge or exercise the consumer and producer. A suite that
+runs multiple live consumer/producer cases has not yet been implemented.
+
+The judge calls the pinned OpenAI model `gpt-4o-2024-11-20`. It needs Python
 3.7 or newer, network access, and an OpenAI API key with model access and credits.
 It uses Python's standard library; no extra Python packages are required.
 
-Put the key in a local `.env` file beside `eval.py`:
+Put the key in a local `.env` file beside `judge_validation.py`:
 
 ```dotenv
 OPENAI_API_KEY=your-key-here
@@ -47,21 +51,30 @@ key is excluded from diagnostic output.
 Run from this repository:
 
 ```sh
-python3 -B eval.py
-python3 -B eval.py 4 5
+python3 -B judge_validation.py
+python3 -B judge_validation.py 4 5
 ```
 
-The first command evaluates one actual `./consumer sum 2 3` response; the second
-selects another pair. To judge supplied text, pass JSON lines containing exactly
+The first command runs the 11 reviewed examples in `judge_validation_cases.json`, making one
+API call per example. These fixed responses test the judge's judgments; the
+consumer and producer are not called. Five examples should be accepted and six
+should be rejected. A case passes when the actual verdict matches its reviewed
+expectation. Expected verdicts stay local and are not sent to the model.
+
+The second command evaluates one actual `./consumer sum 4 5` response. Use
+`python3 -B judge_validation.py 2 3` to check that pair. This optional mode
+checks one live response; it is not a consumer/producer eval suite.
+
+To judge supplied text, pass JSON lines containing exactly
 integer `a` and `b` values from 0 through 9 and a string `response` to
-`python3 -B eval.py --responses-stdin`.
+`python3 -B judge_validation.py --responses-stdin`.
 
 On the current Apple Silicon setup, the installed Homebrew Python has a working
 TLS trust store:
 
 ```sh
-/opt/homebrew/opt/python@3.11/libexec/bin/python3 -B eval.py
-/opt/homebrew/opt/python@3.11/libexec/bin/python3 -B eval.py 4 5
+/opt/homebrew/opt/python@3.11/libexec/bin/python3 -B judge_validation.py
+/opt/homebrew/opt/python@3.11/libexec/bin/python3 -B judge_validation.py 4 5
 ```
 
 Use this interpreter if the default `python3` reports
@@ -70,15 +83,17 @@ the `--responses-stdin` mode described above.
 
 The terminal shows a running message, then PASS, FAIL, or ERROR for each case,
 with the operands, expected sum, response, judge verdict, and duration. A final
-summary counts passed, failed, and errored cases. PASS means the model returned
-ACCEPT; FAIL means it returned REJECT. ERROR means no usable verdict was obtained
-because the consumer or evaluator failed. Input and setup errors stop the run
-with a readable message. Response text is quoted, with newlines shown as `\n`.
+summary counts passed, failed, and errored cases. The reviewed suite shows case
+IDs and expected verdicts: PASS means the verdict matched; FAIL means it did not.
+For a live consumer check or `--responses-stdin`, the expected verdict is ACCEPT.
+ERROR means no usable verdict was obtained because the consumer or evaluator
+failed. Input and setup errors stop the run with a readable message. Response
+text is quoted, with newlines shown as `\n`.
 
 To save full records while keeping the terminal readable, use `--evidence PATH`:
 
 ```sh
-/opt/homebrew/opt/python@3.11/libexec/bin/python3 -B eval.py --evidence run.jsonl
+/opt/homebrew/opt/python@3.11/libexec/bin/python3 -B judge_validation.py --evidence run.jsonl
 ```
 
 The parent directory must exist, and the file must be new; existing files are
@@ -99,11 +114,17 @@ retries. The seed and temperature do not guarantee identical future responses.
 
 The optional JSONL evidence file records the request messages, raw API response,
 model, backend fingerprint, token usage, termination reason, timing, and request ID.
+Suite evidence also records the case IDs, expected verdicts, actual outcomes,
+and suite checksum. Reference labels are stored in evidence, not API messages.
 The API does not expose its internal rendered prompt or generated token IDs.
 Requests send the judging instruction, expected sum, and response text to OpenAI
 and consume API credits.
 
-Exit status 0 means all model verdicts were ACCEPT; 1 means at least one REJECT;
-2 means an input, setup, API, verdict, consumer, or evidence-file error. These
-statuses report model judgments; they do not independently prove those judgments
-correct.
+Exit status 0 means every verdict matched its expectation; 1 means at least one
+mismatch without errors; 2 means an input, setup, API, verdict, consumer, or
+evidence-file error.
+
+The reviewed examples check agreement with development labels; passing them
+does not establish general evaluator reliability or verify the live consumer.
+Live-response statuses report model judgments and do not independently prove
+those judgments correct.
