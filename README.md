@@ -56,6 +56,18 @@ selects another pair. To judge supplied text, pass JSON lines containing exactly
 integer `a` and `b` values from 0 through 9 and a string `response` to
 `python3 -B eval.py --responses-stdin`.
 
+On the current Apple Silicon setup, the installed Homebrew Python has a working
+TLS trust store:
+
+```sh
+/opt/homebrew/opt/python@3.11/libexec/bin/python3 -B eval.py
+/opt/homebrew/opt/python@3.11/libexec/bin/python3 -B eval.py 4 5
+```
+
+Use this interpreter if the default `python3` reports
+`CERTIFICATE_VERIFY_FAILED`; TLS verification stays enabled. It also supports
+the `--responses-stdin` mode described above.
+
 Python computes the expected sum. The model judges whether the response clearly
 communicates it without contradiction or an unresolved alternative. Equivalent
 wording and capitalization are acceptable; number words must be conventionally
@@ -76,6 +88,3 @@ and consume API credits.
 Exit status 0 means all model verdicts were ACCEPT; 1 means at least one REJECT;
 2 means an input, API, verdict, or consumer error. These statuses report model
 judgments; they do not independently prove those judgments correct.
-
-Initial independent development checks matched the reviewed labels. Fresh
-held-out validation and broader repeatability checks remain pending.
