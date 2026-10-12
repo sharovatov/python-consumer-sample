@@ -25,8 +25,65 @@ JUDGING_INSTRUCTION = (
 )
 
 
-def emit(record):
-    print(json.dumps(record, ensure_ascii=False), flush=True)
+class EvidenceError(Exception):
+    """The requested evidence file could not be written."""
+
+
+class Reporter:
+    def __init__(self, evidence=None):
+        self.evidence = evidence
+        self.started = time.monotonic()
+
+    def emit(self, record):
+        if self.evidence is not None:
+            try:
+                self.evidence.write(json.dumps(record, ensure_ascii=False) + "\n")
+                self.evidence.flush()
+            except (OSError, UnicodeError) as error:
+                raise EvidenceError(str(error)) from error
+
+        kind = record["type"]
+        if kind == "run":
+            count = record["case_count"]
+            source = record["source"].replace("_", " ")
+            print("Consumer answer evaluation")
+            print(f"Judge: {record['model']}")
+            print(f"Source: {source}")
+            print(f"\nRunning {count} {'case' if count == 1 else 'cases'}...\n", flush=True)
+        elif kind == "result":
+            if record["status"] == "judged":
+                label = "PASS" if record["verdict"] == "ACCEPT" else "FAIL"
+            else:
+                label = "ERROR"
+            title = f"{label:<5} sum({record['a']}, {record['b']})"
+            print(f"{title:<48} {record['elapsed_seconds']:.2f}s")
+            print(f"      Expected: {record['expected_sum']}")
+            response = (
+                json.dumps(record["response"], ensure_ascii=False)
+                if "response" in record else "(unavailable)"
+            )
+            print(f"      Response: {response}")
+            print(f"      Judge:    {record.get('verdict') or '(no verdict)'}")
+            if label == "ERROR":
+                stage = record["status"].replace("_", " ")
+                detail = record.get("message") or record.get("error", "unknown error")
+                detail = str(detail).replace("\n", "\n                ")
+                http = f" (HTTP {record['http_status']})" if "http_status" in record else ""
+                print(f"      Error:    {stage}{http}: {detail}")
+                if record.get("consumer_stderr"):
+                    print("      Stderr:   " + json.dumps(record["consumer_stderr"], ensure_ascii=False))
+            print(flush=True)
+        elif kind == "error":
+            stage = record["stage"].replace("_", " ")
+            print(f"ERROR {stage}: {record['error']}", flush=True)
+        elif kind == "summary":
+            errors = record["evaluator_errors"] + record["consumer_errors"]
+            elapsed = time.monotonic() - self.started
+            print(
+                f"{record['accept']} passed, {record['reject']} failed, "
+                f"{errors} {'error' if errors == 1 else 'errors'} in {elapsed:.2f}s",
+                flush=True,
+            )
 
 
 def operand(value):
@@ -204,11 +261,46 @@ def main(argv=None):
         "--responses-stdin", action="store_true",
         help='judge JSON lines containing {"a": 2, "b": 3, "response": "five"}',
     )
+    parser.add_argument(
+        "--evidence", type=Path, metavar="PATH",
+        help="save full JSONL records to a new file while showing readable results",
+    )
     args = parser.parse_args(argv)
     if args.responses_stdin and args.operands:
         parser.error("--responses-stdin cannot be combined with operands")
     if len(args.operands) not in (0, 2):
         parser.error("provide both operands or neither")
+
+    evidence = None
+    if args.evidence is not None:
+        try:
+            evidence = args.evidence.open("x", encoding="utf-8")
+        except OSError as error:
+            print(f"ERROR evidence: {error}", flush=True)
+            return 2
+
+    evidence_ok = True
+    status = 2
+    try:
+        status = run(args, Reporter(evidence))
+    except EvidenceError as error:
+        print(f"\nERROR evidence: {error}", flush=True)
+        evidence_ok = False
+    finally:
+        if evidence is not None:
+            try:
+                evidence.close()
+            except (OSError, UnicodeError) as error:
+                print(f"\nERROR evidence: {error}", flush=True)
+                evidence_ok = False
+                status = 2
+    if evidence is not None and evidence_ok:
+        print(f"Evidence: {args.evidence}", flush=True)
+    return status
+
+
+def run(args, reporter):
+    emit = reporter.emit
     try:
         if args.responses_stdin:
             cases = read_responses(sys.stdin)

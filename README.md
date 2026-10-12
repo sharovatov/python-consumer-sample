@@ -68,6 +68,24 @@ Use this interpreter if the default `python3` reports
 `CERTIFICATE_VERIFY_FAILED`; TLS verification stays enabled. It also supports
 the `--responses-stdin` mode described above.
 
+The terminal shows a running message, then PASS, FAIL, or ERROR for each case,
+with the operands, expected sum, response, judge verdict, and duration. A final
+summary counts passed, failed, and errored cases. PASS means the model returned
+ACCEPT; FAIL means it returned REJECT. ERROR means no usable verdict was obtained
+because the consumer or evaluator failed. Input and setup errors stop the run
+with a readable message. Response text is quoted, with newlines shown as `\n`.
+
+To save full records while keeping the terminal readable, use `--evidence PATH`:
+
+```sh
+/opt/homebrew/opt/python@3.11/libexec/bin/python3 -B eval.py --evidence run.jsonl
+```
+
+The parent directory must exist, and the file must be new; existing files are
+never overwritten. Without this option, no evidence file is written. File
+errors return exit status 2. An evidence write error stops the run; the file
+may contain only the records saved before that error.
+
 Python computes the expected sum. The model judges whether the response clearly
 communicates it without contradiction or an unresolved alternative. Equivalent
 wording and capitalization are acceptable; number words must be conventionally
@@ -79,12 +97,13 @@ evaluator errors and supply no acceptance verdict. Requests use temperature 0,
 top_p 1, seed 0, a 256-token cap, and `store: false`. There are no automatic
 retries. The seed and temperature do not guarantee identical future responses.
 
-JSON-line evidence records the request messages, raw API response, model,
-backend fingerprint, token usage, termination reason, timing, and request ID.
+The optional JSONL evidence file records the request messages, raw API response,
+model, backend fingerprint, token usage, termination reason, timing, and request ID.
 The API does not expose its internal rendered prompt or generated token IDs.
 Requests send the judging instruction, expected sum, and response text to OpenAI
 and consume API credits.
 
 Exit status 0 means all model verdicts were ACCEPT; 1 means at least one REJECT;
-2 means an input, API, verdict, or consumer error. These statuses report model
-judgments; they do not independently prove those judgments correct.
+2 means an input, setup, API, verdict, consumer, or evidence-file error. These
+statuses report model judgments; they do not independently prove those judgments
+correct.
